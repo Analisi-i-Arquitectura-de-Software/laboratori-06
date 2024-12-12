@@ -9,4 +9,7 @@ public interface CustomerRepository extends CrudRepository<Customer, Long> {
 	List<Customer> findByLastName(String lastName);
 
 	Customer findById(long id);
+
+	List<Customer> findByFriendsContains(Customer friend);
+
 }

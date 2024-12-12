@@ -1,3 +1,5 @@
+// cSpell:locale en,ca
+
 :toc:
 :tabsize: 4
 :icons: font
@@ -177,4 +179,362 @@ The following guides may also be helpful:
 * https://spring.io/guides/gs/accessing-data-mysql/[Accessing data with MySQL]
 * https://spring.io/guides/gs/accessing-data-neo4j/[Accessing Data with Neo4j]
 
+
+== AAS extension
+
+Per tal d'aprofundir una mica més en la persistència de dades emprant JPA,
+s'ha estès una mica més el tutorial, per tal d'incloure relacions entre diferents entitats.
+
+== Relació _one-to-many_
+
+Per tal de modelar una relació _one-to-many_ es definirà l'entitat `Order`,
+que representa una comanda d'un client.
+
+Un `Customer` pot tenir moltes `Order`, però una `Order` pertany a un sol `Customer`.
+Per tant, es tracta d'una relació _one-to-many_.
+
+Recorda que en bases de dades relacionals, una relació _one-to-many_,
+en realitat, es controla des de el costat del _many_, mitjançant una clau forana cap al costat del _one_.
+Cal tenir això en compte a l'hora de definir les entitats relacionades.
+
+En primer lloc, defineix l'entitat `Order`:
+
+[source, java]
+----
+@Entity
+@Table(name = "orders")
+public class Order {
+
+	@Id
+	@GeneratedValue(strategy=GenerationType.AUTO)
+	private Long id;
+
+	@ManyToOne
+	@JoinColumn(
+			name = "customer_id",
+			nullable = false )
+	private Customer customer;
+
+	private BigDecimal amount;
+
+	protected Order() {}
+
+	public Order(BigDecimal amount) {
+		this.amount = amount;
+	}
+
+	// Getters and setters
+
+}
+----
+
+L'anotació `@ManyToOne` indica que la propietat anotada fa referència a una altra entitat.
+L'anotació opcional `@JoinColumn` permet ajustar la configuració de la relació.
+En aquest cas se li especifica el nom del camp de la taula `orders` que farà referència a la taula de clients.
+A més, també s'especifica que aquest camp no pot ser `null`.
+
+A l'altra costat de la relació, al costat del client, es pot definir una propietat inversa,
+per tal de poder navegar la relació en ambdós sentits:
+
+
+[source, java]
+----
+public class Customer {
+	
+	// ...
+
+	@OneToMany(mappedBy = "customer")
+	private Set<Order> orders = new HashSet<>();
+
+	// ...
+
+	public void addOrder(Order order) {
+		order.setCustomer(this);
+		this.orders.add(order);
+	}
+
+	public void removeOrder(Order order) {
+		order.setCustomer(null);
+		this.orders.remove(order);
+	}
+
+}
+----
+
+L'anotació `OneToMany` indica que la propietat anotada fa referència al costat _many_ d'una relació _one-to-many_.
+En aquest cas, s'ha d'indicar l'atribut `mappedBy`, que indica el camp de l'entitat `Order` que fa referència a l'entitat `Customer`,
+per tal de que la implementació de JPA pugui establir la relació correctament.
+
+Note: Fixa't que el nom del camp es refereix al nom del camp en la classe Java,
+no al nom del camp en la taula de la base de dades.
+
+Per tal de poder consultar comandes, cal definir el corresponent repository:
+
+[source, java]
+----
+public interface OrderRepository extends CrudRepository<Order, Long> {
+
+	List<Order> findByCustomer(Customer customer);
+
+	Order findOneById(long id);
+
+}
+----
+
+En aquest repositori s'ha definit un mètode per tal d'obtenir totes les comandes associades a un client.
+Fixa't que quan es treballa amb JPA, no es treballa amb els identificadors de les entitats.
+Una vegada configurada la relació, JPA ja sap com obtenir les entitats relacionades i,
+per tant, es treballa directament amb els objectes Java, com pots veure en el mètode `findByCustomer`.
+
+Per tal de fer més fàcil la gestió de les entitats, és habitual configurar _cascades_ a les relacions,
+per tal de propagar les operacions d'escriptura des de l'entitat principal, cap a l'entitat secundària.
+
+En aquest cas, l'entitat principal és el client, i la secundària són les seves comandes.
+Per tant, defineix la següent cascada a l'entitat `Customer`:
+
+[source, java]
+----
+	@OneToMany(
+			mappedBy = "customer",
+			cascade = { CascadeType.MERGE, CascadeType.PERSIST }
+	)
+	private Set<Order> orders = new HashSet<>();
+----
+
+Amb aquesta cascada, li indiquem a la implementació de JPA que quan es persisteixi
+una entitat de tipus `Customer`, també ha de persistir les entitats de tipus `Order` relacionades.
+
+Ara, hauries de poder executar la següent prova unitaria:
+
+[source, java]
+----
+@DataJpaTest
+public class OneToManyTests {
+
+    @Autowired
+    private TestEntityManager entityManager;
+
+    @Autowired
+    private CustomerRepository customers;
+
+    @Autowired
+    private OrderRepository orders;
+
+
+    @Test
+    public void testFindOrderByCustomer() {
+        Customer customer = new Customer("first", "last");
+        Order order = new Order(new BigDecimal("15.75"));
+        customer.addOrder(order);
+        customer = customers.save(customer);
+
+        List<Order> foundOrders = orders.findByCustomer(customer);
+
+        assertThat(foundOrders).hasSize(1);
+        assertThat(foundOrders.get(0).getAmount()).isEqualTo(new BigDecimal("15.75"));
+    }
+}
+----
+
+Fixa't que la única operació `save` que s'executa és la del client.
+Però com que has definit una cascada, en persistir el client també es persisteix la comanda.
+Per tant, quan després es busca la comanda emprant el repositori de comandes, es troba la comanda.
+
+Com que no té sentit que hi hagi comandes sense client, té sentit definir també una cascada d'esborrat,
+de forma que si s'esborra un client també s'esborrin les seves comandes.
+
+A més, tampoc té sentit que hi hagi ordres que no estiguin associades a clients,
+això, de fet, no ho permetria la base de dades, ja que hem definit que la columna `customer_id`
+no pot ser tenir valor `null`.
+
+Modifica la relació a l'entitat `Customer`:
+
+[source, java]
+----
+	@OneToMany(
+			mappedBy = "customer",
+			cascade = { CascadeType.MERGE, CascadeType.PERSIST, CascadeType.REMOVE },
+			orphanRemoval = true
+	)
+	private Set<Order> orders = new HashSet<>();
+----
+
+Fixa't que hem afegit `CascadeType.REMOVE` a la cascada del client cap a la comanda.
+Això provocarà que quan s'esborri un client, també s'esborrin les comandes associades.
+
+També hem afegit el camp `orphanRemoval = true`.
+Això provoca que si en algun moment una comanda es queda sense un client associat,
+s'esborri automàticament.
+
+Ara hauries de poder executar les següents proves unitàries:
+
+[source, java]
+----
+@DataJpaTest
+public class OneToManyTests {
+
+	// ...
+
+	 @Test
+    public void testOrphanRemovalAll() {
+        Customer customer = new Customer("first", "last");
+        Order order = new Order(new BigDecimal("15.75"));
+        customer.addOrder(order);
+        customer = customers.save(customer);
+
+        customer.getOrders().clear();
+        customers.save(customer);
+
+        List<Order> foundOrder = orders.findByCustomer(customer);
+        assertThat(foundOrder).hasSize(0);
+    }
+
+    @Test
+    public void testOrphanRemovalOne() {
+        Customer customer = new Customer("first", "last");
+        Order order1 = new Order(new BigDecimal("15.75"));
+        Order order2 = new Order(new BigDecimal("45.22"));
+        customer.addOrder(order1);
+        customer.addOrder(order2);
+        customer = customers.save(customer);
+
+        customer.removeOrder(customer.getOrders().stream().findFirst().orElseThrow());
+        customers.save(customer);
+
+        List<Order> foundOrder = orders.findByCustomer(customer);
+        assertThat(foundOrder).hasSize(1);
+    }
+
+	@Test
+    public void testDeleteCascade() {
+        Customer customer = new Customer("first", "last");
+        Order order = new Order(new BigDecimal("15.75"));
+        customer.addOrder(order);
+        customer = customers.save(customer);
+
+        customers.delete(customer);
+
+        Iterable<Order> foundOrders = orders.findAll();
+        assertThat(StreamSupport.stream(foundOrders.spliterator(), false).count()).isEqualTo(0);
+    }
+
+}
+----
+
+Fixa't que en el primer cas s'elimina la relació entre el client i totes les seves comandes.
+Quan es persisteix el client, es propaga la operació de persistència (degut a la cascada)
+i com que la implementació de JPA detecta que les comandes han quedat "orfes", les elimina.
+
+En el segon cas, només s'elimina la relació entre el client i una de les seves comandes associades.
+Per tant, quan després es consulten les comandes associades al client, només se'n troba una.
+
+Finalment, en el tercer cas s'elimina el client.
+En conseqüència, quan després s'obtenen totes les comandes, no se'n troba cap.
+
+== Relació _many-to-many_
+
+JPA suporta la definició de relacions _many-to-many_.
+En aquest cas, el que fa la implementació de JPA és crear una taula associativa.
+
+Modifica la classe `Customer`, i afegeix-li la següent relació _many-to-many_:
+
+
+[source, java]
+----
+ public class Customer {
+
+	// ...
+
+	@ManyToMany
+	private Set<Customer> friends = new HashSet<>();
+
+	// ...
+
+	public void addFriend(Customer customer) {
+		this.friends.add(customer);
+	}
+
+	public void removeFriend(Customer customer) {
+		this.friends.remove(customer);
+	}
+
+ }
+----
+
+D'aquesta forma s'indica que l'entitat client té una relació _many-to-many_ amb ella mateixa.
+
+A continuació, defineix el següent mètode al `CustomerRepository`:
+
+[source, java]
+----
+public interface CustomerRepository extends CrudRepository<Customer, Long> {
+
+	// ...
+
+	List<Customer> findByFriendsContains(Customer friend);
+
+}
+----
+
+Ara, hauries de poder executar aquestes proves unitàries:
+
+[source, java]
+----
+@DataJpaTest
+public class ManyToManyTests {
+
+    @Autowired
+    private CustomerRepository customers;
+
+    @Test
+    public void testFindCustomerByFriends() {
+        customers.saveAll(List.of(
+                new Customer("first1", "last1"),
+                new Customer("first2", "last2"),
+                new Customer("first3", "last3")
+        ));
+
+        Customer customer1 = customers.findByLastName("last1").get(0);
+        Customer customer3 = customers.findByLastName("last3").get(0);
+        customer1.addFriend(customer3);
+        customers.save(customer1);
+
+        List<Customer> friendsOf3 = customers.findByFriendsContains(customer3);
+        assertThat(friendsOf3).extracting(Customer::getLastName).containsOnly("last1");
+
+        List<Customer> friendsOf1 = customers.findByFriendsContains(customer1);
+        assertThat(friendsOf1).isEmpty();
+    }
+
+    @Test
+    public void testFindCustomerByReciprocalFriends() {
+        customers.saveAll(List.of(
+                new Customer("first1", "last1"),
+                new Customer("first2", "last2"),
+                new Customer("first3", "last3")
+        ));
+
+        Customer customer1 = customers.findByLastName("last1").get(0);
+        Customer customer3 = customers.findByLastName("last3").get(0);
+        customer1.addFriend(customer3);
+        customer3.addFriend(customer1);
+        customers.save(customer1);
+        customers.save(customer3);
+
+        List<Customer> friendsOf1 = customers.findByFriendsContains(customer1);
+        assertThat(friendsOf1).extracting(Customer::getLastName).containsOnly("last3");
+
+        List<Customer> friendsOf3 = customers.findByFriendsContains(customer3);
+        assertThat(friendsOf3).extracting(Customer::getLastName).containsOnly("last1");
+    }
+
+}
+----
+
+En aquest cas particular, els dos participants de la relació fan referència a la mateixa entitat,
+però això no té perquè ser així, evidentment.
+Fixa't que, tot i que les dues entitats són de la mateixa classe, l'ordre importa.
+És a dir, que `customer1` tingui com amic a `customer3`, no implica que `customer3` tingui com a amic a `customer1`.
+
 include::https://raw.githubusercontent.com/spring-guides/getting-started-macros/main/footer.adoc[]
+
